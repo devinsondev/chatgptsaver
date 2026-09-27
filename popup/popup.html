@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChatGPT Saver</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <strong>ChatGPT Saver</strong>
+      <span id="state">готов</span>
+    </header>
+
+    <section class="panel">
+      <button id="collect" class="primary" type="button">Собрать текущий чат</button>
+      <button id="finishScan" type="button" hidden>Завершить сейчас</button>
+      <p id="summary">Открой временный чат на chatgpt.com и нажми кнопку.</p>
+    </section>
+
+    <section class="actions" aria-label="Действия с сохраненным чатом">
+      <button id="preview" type="button" disabled>Превью</button>
+      <button id="downloadMarkdown" type="button" disabled>Markdown</button>
+      <button id="downloadHtml" type="button" disabled>HTML</button>
+      <button id="copyMarkdown" type="button" disabled>Копировать</button>
+    </section>
+
+    <p id="warning" class="warning" hidden></p>
+  </main>
+
+  <script src="../shared/formatters.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

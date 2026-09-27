@@ -1,0 +1,53 @@
+{
+  "manifest_version": 2,
+  "name": "ChatGPT Chat Saver",
+  "version": "0.2.0",
+  "description": "Save the currently open ChatGPT conversation as Markdown or HTML.",
+  "applications": {
+    "gecko": {
+      "id": "chatgpt-chat-saver@example.local"
+    }
+  },
+  "permissions": [
+    "activeTab",
+    "clipboardWrite",
+    "downloads",
+    "storage",
+    "tabs",
+    "unlimitedStorage",
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "contentScript.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "browser_action": {
+    "default_title": "Save ChatGPT chat",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "48": "icons/icon.svg",
+      "96": "icons/icon.svg"
+    }
+  },
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
+  "web_accessible_resources": [
+    "preview/preview.html"
+  ]
+}

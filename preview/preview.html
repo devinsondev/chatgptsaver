@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChatGPT Chat Preview</title>
+  <link rel="stylesheet" href="preview.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p>ChatGPT Saver</p>
+      <h1 id="title">Превью чата</h1>
+    </div>
+    <nav aria-label="Действия">
+      <button id="downloadMarkdown" type="button">Markdown</button>
+    <button id="downloadHtml" type="button">HTML</button>
+      <button id="copyMarkdown" type="button">Копировать</button>
+    </nav>
+  </header>
+
+  <main>
+    <p id="notice" class="notice" hidden></p>
+    <section id="meta" class="meta"></section>
+    <section id="messages" class="messages"></section>
+    <p id="empty" class="empty" hidden>Пока нечего показать. Сначала собери чат через кнопку аддона.</p>
+  </main>
+
+  <script src="../shared/formatters.js"></script>
+  <script src="preview.js"></script>
+</body>
+</html>
