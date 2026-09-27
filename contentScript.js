@@ -1,5 +1,5 @@
 (() => {
-  const SCRIPT_VERSION = "0.3.0";
+  const SCRIPT_VERSION = "0.4.0";
 
   if (window.__chatGptChatSaverVersion === SCRIPT_VERSION) {
     return;
@@ -9,11 +9,18 @@
   window.__chatGptChatSaverLoaded = true;
 
   const runtime = typeof browser !== "undefined" ? browser.runtime : chrome.runtime;
-  const MESSAGE_TYPE = "chatgpt-saver:extract-v2";
+  const MESSAGE_TYPE = "chatgpt-saver:extract-v3";
   const CONTROL_MESSAGE_TYPE = "chatgpt-saver:control";
   const PROGRESS_MESSAGE_TYPE = "chatgpt-saver:progress";
-  const MESSAGE_SELECTOR = "[data-message-author-role]";
-  const MAX_SCROLL_STEPS = 420;
+  const LEGACY_MESSAGE_SELECTOR = "[data-message-author-role]";
+  const MODERN_TURN_SELECTOR = "div[data-turn-key]";
+  const MODERN_USER_SELECTOR = "[data-user-message-bubble]";
+  const MODERN_ASSISTANT_SELECTOR = "[data-markdown-text-style='assistant-message']";
+  const TIMELINE_SCROLLER_SELECTOR = "[data-app-action-timeline-scroll]";
+  const CONVERSATION_ANCHOR_SELECTOR = `${MODERN_TURN_SELECTOR}, ${LEGACY_MESSAGE_SELECTOR}`;
+  const MAX_SCROLL_STEPS = 900;
+  const TOP_SETTLE_DELAY = 350;
+  const TOP_STALE_LIMIT = 6;
   const SUPPORTED_ROLES = new Set(["user", "assistant"]);
   const BLOCK_TAGS = new Set([
     "ADDRESS",
@@ -99,8 +106,13 @@
       if (scroll) {
         const scroller = findConversationScroller();
         const previousScroll = getScrollState(scroller);
-        const addSnapshot = (stage, stats) => {
-          const added = collector.add(readMessagesFromDom(), getScrollTop(scroller), stage);
+        const addSnapshot = (stage, stats, finalOrder = false) => {
+          const added = collector.add(
+            readMessagesFromDom(),
+            getLogicalScrollTop(scroller),
+            stage,
+            finalOrder
+          );
 
           reportProgress(collector.size(), stage, scanControl, stats);
 
@@ -163,30 +175,69 @@
     await waitForDom(220);
     addSnapshot("current", stats);
 
-    await sweepToEdge(scroller, "bottom", step, addSnapshot, stats, scanControl);
+    // ChatGPT now virtualizes the thread in a column-reverse scroller.
+    // Walk to the oldest loaded turn first so older history can be mounted,
+    // then sweep back to the newest turn to collect every virtualized window
+    // and establish a stable chronological order.
     await sweepToEdge(scroller, "top", step, addSnapshot, stats, scanControl);
-    await sweepToEdge(scroller, "bottom", step, addSnapshot, stats, scanControl);
+
+    if (!scanControl.finishRequested) {
+      addSnapshot("top", stats, true);
+      await sweepToEdge(scroller, "bottom", step, addSnapshot, stats, scanControl, true);
+    }
 
     return stats;
   }
 
-  async function sweepToEdge(scroller, edge, step, addSnapshot, stats, scanControl) {
+  async function sweepToEdge(
+    scroller,
+    edge,
+    step,
+    addSnapshot,
+    stats,
+    scanControl,
+    finalOrder = false
+  ) {
     let staleAtEdge = 0;
     let noNewInThisSweep = 0;
+    const staleLimit = edge === "top" ? TOP_STALE_LIMIT : 4;
 
-    while (stats.steps < MAX_SCROLL_STEPS && staleAtEdge < 5 && !scanControl.finishRequested) {
-      const beforeTop = getScrollTop(scroller);
+    while (stats.steps < MAX_SCROLL_STEPS && staleAtEdge < staleLimit && !scanControl.finishRequested) {
+      const beforeTop = getLogicalScrollTop(scroller);
       const beforeMax = getMaxScroll(scroller);
-      const target = edge === "top" ? Math.max(0, beforeTop - step) : Math.min(beforeMax, beforeTop + step);
+      const target =
+        edge === "top"
+          ? Math.max(0, beforeTop - step)
+          : Math.min(beforeMax, beforeTop + step);
 
       performScroll(scroller, target, edge, step);
       await waitForDom(190);
 
-      const added = addSnapshot(edge, stats);
-      const afterTop = getScrollTop(scroller);
-      const afterMax = getMaxScroll(scroller);
-      const atEdge = edge === "top" ? afterTop <= 2 : afterTop >= afterMax - 2;
-      const moved = Math.abs(afterTop - beforeTop) > 2 || Math.abs(afterMax - beforeMax) > 2;
+      let added = addSnapshot(edge, stats, finalOrder);
+      let afterTop = getLogicalScrollTop(scroller);
+      let afterMax = getMaxScroll(scroller);
+      let atEdge = edge === "top" ? afterTop <= 2 : afterTop >= afterMax - 2;
+      let moved = Math.abs(afterTop - beforeTop) > 2 || Math.abs(afterMax - beforeMax) > 2;
+
+      // At the top ChatGPT can asynchronously prepend older virtualized turns.
+      // Give it a settling window and re-check scrollHeight before declaring
+      // that the beginning of the conversation has really been reached.
+      if (edge === "top" && atEdge && added === 0) {
+        await waitForDom(TOP_SETTLE_DELAY);
+
+        const settledAdded = addSnapshot(edge, stats, finalOrder);
+        const settledTop = getLogicalScrollTop(scroller);
+        const settledMax = getMaxScroll(scroller);
+
+        added += settledAdded;
+        moved =
+          moved ||
+          Math.abs(settledTop - afterTop) > 2 ||
+          Math.abs(settledMax - afterMax) > 2;
+        afterTop = settledTop;
+        afterMax = settledMax;
+        atEdge = afterTop <= 2;
+      }
 
       if (added === 0) {
         stats.noNewSteps += 1;
@@ -204,7 +255,7 @@
 
       stats.steps += 1;
 
-      if (noNewInThisSweep >= 70 && atEdge) {
+      if (noNewInThisSweep >= 90 && atEdge) {
         break;
       }
     }
@@ -223,7 +274,7 @@
     let sequence = 0;
 
     return {
-      add(messages, scrollTop, stage) {
+      add(messages, scrollTop, stage, finalOrder = false) {
         let added = 0;
 
         for (const message of messages) {
@@ -232,7 +283,13 @@
           const existing = messagesByKey.get(key);
 
           if (existing) {
-            existing.order = Math.min(existing.order, order);
+            if (finalOrder) {
+              existing.order = order;
+              existing.hasFinalOrder = true;
+            } else if (!existing.hasFinalOrder) {
+              existing.order = Math.min(existing.order, order);
+            }
+
             existing.lastStage = stage;
 
             if (message.content.length > existing.content.length) {
@@ -243,7 +300,8 @@
               ...message,
               order,
               sequence,
-              lastStage: stage
+              lastStage: stage,
+              hasFinalOrder: finalOrder
             });
             sequence += 1;
             added += 1;
@@ -269,9 +327,19 @@
   }
 
   function readMessagesFromDom() {
-    const roleNodes = Array.from(document.querySelectorAll(MESSAGE_SELECTOR))
+    const modernMessages = readMessagesFromModernTurns();
+
+    if (modernMessages.length > 0) {
+      return modernMessages;
+    }
+
+    const roleNodes = Array.from(document.querySelectorAll(LEGACY_MESSAGE_SELECTOR))
       .filter((node) => SUPPORTED_ROLES.has(node.getAttribute("data-message-author-role")))
-      .filter((node) => !node.parentElement || !node.parentElement.closest(MESSAGE_SELECTOR));
+      .filter(
+        (node) =>
+          !node.parentElement ||
+          !node.parentElement.closest(LEGACY_MESSAGE_SELECTOR)
+      );
 
     if (roleNodes.length > 0) {
       return roleNodes
@@ -280,6 +348,58 @@
     }
 
     return readMessagesFromFallbackTurns();
+  }
+
+  function readMessagesFromModernTurns() {
+    const turns = Array.from(document.querySelectorAll(MODERN_TURN_SELECTOR)).filter(
+      (turn) =>
+        !turn.parentElement ||
+        !turn.parentElement.closest(MODERN_TURN_SELECTOR)
+    );
+    const messages = [];
+
+    for (const turn of turns) {
+      const turnKey = turn.getAttribute("data-turn-key") || "";
+      const userRoot = turn.querySelector(MODERN_USER_SELECTOR);
+
+      if (userRoot) {
+        const content = extractReadableMarkdown(userRoot);
+
+        if (content) {
+          messages.push({
+            id: turnKey ? `${turnKey}:user` : "",
+            role: "user",
+            index: messages.length,
+            content
+          });
+        }
+      }
+
+      const assistantRoots = Array.from(
+        turn.querySelectorAll(MODERN_ASSISTANT_SELECTOR)
+      ).filter(
+        (node) =>
+          !node.parentElement ||
+          !node.parentElement.closest(MODERN_ASSISTANT_SELECTOR)
+      );
+      const assistantContent = cleanupMarkdown(
+        assistantRoots
+          .map((node) => extractReadableMarkdown(node))
+          .filter(Boolean)
+          .join("\n\n")
+      );
+
+      if (assistantContent) {
+        messages.push({
+          id: turnKey ? `${turnKey}:assistant` : "",
+          role: "assistant",
+          index: messages.length,
+          content: assistantContent
+        });
+      }
+    }
+
+    return messages;
   }
 
   function messageFromRoleNode(node, index) {
@@ -323,7 +443,7 @@
   }
 
   function inferRole(turn, index) {
-    const roleNode = turn.querySelector(MESSAGE_SELECTOR);
+    const roleNode = turn.querySelector(LEGACY_MESSAGE_SELECTOR);
 
     if (roleNode) {
       return roleNode.getAttribute("data-message-author-role");
@@ -485,6 +605,12 @@
   }
 
   function findConversationScroller() {
+    const timelineScroller = document.querySelector(TIMELINE_SCROLLER_SELECTOR);
+
+    if (timelineScroller) {
+      return timelineScroller;
+    }
+
     const messageScroller = findScrollerFromVisibleMessages();
 
     if (messageScroller) {
@@ -492,23 +618,33 @@
     }
 
     const scrollingElement = document.scrollingElement || document.documentElement;
-    const candidates = [scrollingElement, document.body, ...Array.from(document.querySelectorAll("main, main *"))];
+    const candidates = [
+      scrollingElement,
+      document.body,
+      ...Array.from(document.querySelectorAll("main, main *"))
+    ];
     let best = window;
     let bestScore = getMaxScroll(window) * window.innerWidth;
 
     for (const element of candidates) {
-      if (!element || element === document.body && document.body === scrollingElement) {
+      if (
+        !element ||
+        (element === document.body && document.body === scrollingElement)
+      ) {
         continue;
       }
 
       const overflowY = getComputedStyle(element).overflowY;
-      const canScroll = /(auto|scroll|overlay)/.test(overflowY) || element.scrollHeight > element.clientHeight + 120;
+      const canScroll =
+        /(auto|scroll|overlay)/.test(overflowY) ||
+        element.scrollHeight > element.clientHeight + 120;
 
       if (!canScroll || element.clientHeight < 250 || element.clientWidth < 320) {
         continue;
       }
 
-      const score = (element.scrollHeight - element.clientHeight) * element.clientWidth;
+      const score =
+        (element.scrollHeight - element.clientHeight) * element.clientWidth;
 
       if (score > bestScore) {
         best = element;
@@ -520,7 +656,7 @@
   }
 
   function findScrollerFromVisibleMessages() {
-    const messageNode = document.querySelector(MESSAGE_SELECTOR);
+    const messageNode = document.querySelector(CONVERSATION_ANCHOR_SELECTOR);
 
     if (!messageNode) {
       return null;
@@ -529,15 +665,26 @@
     let best = null;
     let bestScore = 0;
 
-    for (let element = messageNode.parentElement; element; element = element.parentElement) {
+    for (
+      let element = messageNode.parentElement;
+      element;
+      element = element.parentElement
+    ) {
       if (element === document.body || element === document.documentElement) {
         break;
       }
 
       if (isElementScrollable(element)) {
-        const messageCount = element.querySelectorAll(MESSAGE_SELECTOR).length;
-        const scrollRange = Math.max(0, element.scrollHeight - element.clientHeight);
-        const score = scrollRange * Math.max(element.clientWidth, 1) + messageCount * 1000000;
+        const messageCount = element.querySelectorAll(
+          CONVERSATION_ANCHOR_SELECTOR
+        ).length;
+        const scrollRange = Math.max(
+          0,
+          element.scrollHeight - element.clientHeight
+        );
+        const score =
+          scrollRange * Math.max(element.clientWidth, 1) +
+          messageCount * 1000000;
 
         if (score > bestScore) {
           best = element;
@@ -552,10 +699,17 @@
   function isElementScrollable(element) {
     const style = getComputedStyle(element);
     const canScrollByStyle = /(auto|scroll|overlay)/.test(style.overflowY);
-    const hasScrollableArea = element.scrollHeight > element.clientHeight + 120;
-    const containsConversation = element.querySelectorAll(MESSAGE_SELECTOR).length >= 2 || element.tagName === "MAIN";
+    const hasScrollableArea =
+      element.scrollHeight > element.clientHeight + 120;
+    const containsConversation =
+      element.querySelectorAll(CONVERSATION_ANCHOR_SELECTOR).length >= 1 ||
+      element.tagName === "MAIN";
 
-    return hasScrollableArea && (canScrollByStyle || containsConversation) && element.clientHeight > 250;
+    return (
+      hasScrollableArea &&
+      (canScrollByStyle || containsConversation) &&
+      element.clientHeight > 250
+    );
   }
 
   function getScrollState(scroller) {
@@ -594,19 +748,34 @@
     return Math.max(0, scroller.scrollHeight - scroller.clientHeight);
   }
 
-  function getScrollTop(scroller) {
+  function isReverseScroller(scroller) {
+    return (
+      scroller !== window &&
+      getComputedStyle(scroller).flexDirection === "column-reverse"
+    );
+  }
+
+  function getLogicalScrollTop(scroller) {
     if (scroller === window) {
-      return window.scrollY;
+      return Math.max(0, window.scrollY);
     }
 
-    return scroller.scrollTop;
+    const max = getMaxScroll(scroller);
+    const physicalTop = Number.isFinite(scroller.scrollTop)
+      ? scroller.scrollTop
+      : 0;
+    const logicalTop = isReverseScroller(scroller)
+      ? max + physicalTop
+      : physicalTop;
+
+    return Math.max(0, Math.min(max, logicalTop));
   }
 
   function getClientHeight(scroller) {
     return scroller === window ? window.innerHeight : scroller.clientHeight;
   }
 
-  function setScrollTop(scroller, top) {
+  function setLogicalScrollTop(scroller, top) {
     if (scroller === window) {
       window.scrollTo({
         top,
@@ -615,8 +784,14 @@
       return;
     }
 
+    const max = getMaxScroll(scroller);
+    const logicalTop = Math.max(0, Math.min(max, top));
+    const physicalTop = isReverseScroller(scroller)
+      ? logicalTop - max
+      : logicalTop;
+
     scroller.scrollTo({
-      top,
+      top: physicalTop,
       behavior: "auto"
     });
   }
@@ -624,7 +799,7 @@
   function performScroll(scroller, target, edge, step) {
     const delta = edge === "top" ? -step : step;
 
-    setScrollTop(scroller, target);
+    setLogicalScrollTop(scroller, target);
     dispatchWheel(scroller, delta);
     dispatchScroll(scroller);
   }
