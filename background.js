@@ -183,7 +183,7 @@ function broadcastState() {
 
 async function requestExtraction(tabId, jobId) {
   const payload = {
-    type: "chatgpt-saver:extract-v2",
+    type: "chatgpt-saver:extract-v3",
     jobId,
     scroll: true
   };
